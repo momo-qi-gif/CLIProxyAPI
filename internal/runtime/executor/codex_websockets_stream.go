@@ -431,7 +431,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				return nil, wsErr
 			}
-			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			if streamErr, terminalBody, ok := codexTerminalFailureErrForSourceWithCooling(payload, from, e.modelLevelCooling()); ok {
 				// A transient capacity or usage-limit rejection during bootstrap is retried on
 				// another credential, so the downstream websocket session must survive this
 				// upstream teardown. Notifying the disconnect here (or when no buffered payload
@@ -719,7 +719,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 				}
 				return
 			}
-			if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			if streamErr, terminalBody, ok := codexTerminalFailureErrForSourceWithCooling(payload, from, e.modelLevelCooling()); ok {
 				terminateReason = "upstream_error"
 				terminateErr = streamErr
 				// Publish the downstream disconnect only after an in-stream error was delivered,

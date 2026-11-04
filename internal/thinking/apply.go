@@ -393,7 +393,7 @@ func applyThinkingDocCore(doc *ojson.Doc, docValid bool, sourceBody []byte, mode
 		}).Debug("thinking: config from model suffix |")
 	} else {
 		config = sourceConfig
-		if !hasThinkingConfig(config) && !updatesChanged && modelInfoResolved && len(sourceBody) > 0 {
+		if !hasThinkingConfig(config) && !updatesChanged && (modelInfoResolved || fromFormat == "claude") && len(sourceBody) > 0 {
 			config = extractSourceThinkingConfig(sourceBody, fromFormat)
 		}
 		if !hasThinkingConfig(config) {
@@ -822,6 +822,15 @@ func extractClaudeConfigFromGetter(get func(string) ojson.Result) ThinkingConfig
 	thinkingType := get("thinking.type").String()
 	if thinkingType == "disabled" {
 		return ThinkingConfig{Mode: ModeNone, Budget: 0}
+	}
+	if thinkingType == "enabled" {
+		if effort := get("output_config.effort"); effort.Exists() && effort.Type == ojson.String {
+			value := strings.ToLower(strings.TrimSpace(effort.String()))
+			switch value {
+			case "low", "medium", "high", "xhigh", "max":
+				return ThinkingConfig{Mode: ModeLevel, Level: ThinkingLevel(value)}
+			}
+		}
 	}
 	if !get("thinking").Exists() || thinkingType == "adaptive" || thinkingType == "auto" {
 		if effort := get("output_config.effort"); effort.Exists() && effort.Type == ojson.String {

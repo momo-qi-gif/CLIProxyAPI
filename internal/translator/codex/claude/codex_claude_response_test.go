@@ -1056,6 +1056,8 @@ func TestConvertCodexResponseToClaude_ShortensLongToolUseIDs(t *testing.T) {
 		var param any
 
 		outputs := ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"`+longCallID+`","name":"lookup"}}`), &param)
+		// The tool is released only after its final arguments are validated.
+		outputs = append(outputs, ConvertCodexResponseToClaude(ctx, "", originalRequest, nil, []byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"`+longCallID+`","name":"lookup","arguments":"{}"}}`), &param)...)
 
 		toolID := ""
 		for _, out := range outputs {
@@ -1132,6 +1134,7 @@ func TestConvertCodexResponseToClaude_StreamStopReasonMapping(t *testing.T) {
 			name: "Tool call wins over stop",
 			chunks: [][]byte{
 				[]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup\"}}"),
+				[]byte(`data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}`),
 				[]byte("data: {\"type\":\"response.completed\",\"response\":{\"stop_reason\":\"stop\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}"),
 			},
 			wantReason: "tool_use",
@@ -2091,6 +2094,8 @@ func TestConvertCodexResponseToClaude_RestoresLongMidConversationToolAdditionNam
 	var param any
 	addedEvent := []byte(fmt.Sprintf(`data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":%q,"arguments":""}}`, midShortName))
 	chunks := ConvertCodexResponseToClaude(context.Background(), "gpt-6.1-sol", originalRequest, nil, addedEvent, &param)
+	doneEvent := []byte(fmt.Sprintf(`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":%q,"arguments":"{}"}}`, midShortName))
+	chunks = append(chunks, ConvertCodexResponseToClaude(context.Background(), "gpt-6.1-sol", originalRequest, nil, doneEvent, &param)...)
 	joined := string(bytes.Join(chunks, nil))
 	if !strings.Contains(joined, `"name":"`+midLongMCPTool+`"`) {
 		t.Fatalf("streaming response did not restore long mid-conversation tool name %q, got: %s", midLongMCPTool, joined)

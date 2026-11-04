@@ -12,6 +12,7 @@ import (
 	"github.com/MoeForge/moego/ojson"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 const codexIncompleteStreamMessage = "stream error: stream disconnected before completion: stream closed before response.completed"
@@ -169,6 +170,18 @@ func codexTerminalFailureErr(eventData []byte) (statusErr, []byte, bool) {
 }
 
 func codexTerminalFailureErrWithCooling(eventData []byte, modelLevelCooling bool) (statusErr, []byte, bool) {
+	return codexTerminalFailureErrForSourceWithCooling(eventData, "", modelLevelCooling)
+}
+
+func codexTerminalFailureErrForSourceWithCooling(eventData []byte, source sdktranslator.Format, modelLevelCooling bool) (statusErr, []byte, bool) {
+	if source == sdktranslator.FormatClaude {
+		if reason, ok := helps.CodexClaudeIncompleteFailureReason(eventData); ok {
+			doc := ojson.NewDocString(`{"error":{"type":"server_error","code":"response_incomplete","message":""}}`)
+			_ = doc.Set("error.message", "upstream response incomplete: "+reason)
+			body := doc.Bytes()
+			return newCodexStatusErrWithCooling(http.StatusBadGateway, body, modelLevelCooling), body, true
+		}
+	}
 	if streamErr, body, ok := codexTerminalStreamErrWithCooling(eventData, modelLevelCooling); ok {
 		return streamErr, body, true
 	}

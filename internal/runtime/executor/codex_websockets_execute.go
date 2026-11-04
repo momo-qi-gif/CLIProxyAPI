@@ -341,7 +341,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", wsErr)
 			return resp, wsErr
 		}
-		if streamErr, terminalBody, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+		if streamErr, terminalBody, ok := codexTerminalFailureErrForSourceWithCooling(payload, from, e.modelLevelCooling()); ok {
 			if sess != nil {
 				unlockSession()
 				e.invalidateUpstreamConn(sess, conn, "terminal_failure", streamErr)

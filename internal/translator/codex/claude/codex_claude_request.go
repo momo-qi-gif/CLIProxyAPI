@@ -404,7 +404,9 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 	var toolItems [][]byte
 	if toolsResult.IsArray() || hasAdditionalTools {
 		webSearchToolNames := buildClaudeWebSearchToolNameSet(toolsResult)
-		_ = templateDoc.SetRawBytes("tool_choice", convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolNameMap, webSearchToolNames))
+		if choice, ok := convertClaudeToolChoiceToCodex(rootResult.Get("tool_choice"), toolsResult, hasAdditionalTools, toolNameMap, webSearchToolNames); ok {
+			_ = templateDoc.SetRawBytes("tool_choice", choice)
+		}
 	}
 	if toolsResult.IsArray() {
 		toolResults := toolsResult.Array()
@@ -440,9 +442,14 @@ func convertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool, 
 		switch thinkingConfig.Get("type").String() {
 		case "enabled":
 			if budgetTokens := thinkingConfig.Get("budget_tokens"); budgetTokens.Exists() {
-				budget := int(budgetTokens.Int())
-				if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
+				switch effort {
+				case "low", "medium", "high", "xhigh", "max":
 					reasoningEffort = effort
+				default:
+					budget := int(budgetTokens.Int())
+					if effort, ok := thinking.ConvertBudgetToLevel(budget); ok && effort != "" {
+						reasoningEffort = effort
+					}
 				}
 			}
 		case "adaptive", "auto":
@@ -566,9 +573,14 @@ func buildClaudeWebSearchToolNameSet(tools ojson.Result) map[string]struct{} {
 	return names
 }
 
-func convertClaudeToolChoiceToCodex(toolChoice ojson.Result, toolNameMap map[string]string, webSearchToolNames map[string]struct{}) []byte {
+func convertClaudeToolChoiceToCodex(toolChoice, toolsResult ojson.Result, hasAdditionalTools bool, toolNameMap map[string]string, webSearchToolNames map[string]struct{}) ([]byte, bool) {
+	if !toolsResult.IsArray() || len(toolsResult.Array()) == 0 {
+		if !hasAdditionalTools {
+			return nil, false
+		}
+	}
 	if !toolChoice.Exists() || toolChoice.Type == ojson.Null {
-		return []byte(`"auto"`)
+		return []byte(`"auto"`), true
 	}
 
 	choiceType := toolChoice.Get("type").String()
@@ -578,30 +590,33 @@ func convertClaudeToolChoiceToCodex(toolChoice ojson.Result, toolNameMap map[str
 
 	switch choiceType {
 	case "auto", "":
-		return []byte(`"auto"`)
+		return []byte(`"auto"`), true
 	case "any":
-		return []byte(`"required"`)
+		return []byte(`"required"`), true
 	case "none":
-		return []byte(`"none"`)
+		return []byte(`"none"`), true
 	case "tool":
 		name := toolChoice.Get("name").String()
+		if name == "" {
+			return []byte(`"auto"`), true
+		}
 		if _, ok := webSearchToolNames[name]; ok {
-			return []byte(`{"type":"web_search"}`)
+			return []byte(`{"type":"web_search"}`), true
 		}
 		if short, ok := toolNameMap[name]; ok {
 			name = short
 		} else {
-			name = shortenNameIfNeeded(name)
+			return []byte(`"auto"`), true
 		}
 		if name == "" {
-			return []byte(`"auto"`)
+			return []byte(`"auto"`), true
 		}
 
-		choice := []byte(`{"type":"function","name":""}`)
-		choice, _ = ojson.SetBytes(choice, "name", name)
-		return choice
+		choiceDoc := ojson.NewDocString(`{"type":"function","name":""}`)
+		_ = choiceDoc.Set("name", name)
+		return choiceDoc.Bytes(), true
 	default:
-		return []byte(`"auto"`)
+		return []byte(`"auto"`), true
 	}
 }
 

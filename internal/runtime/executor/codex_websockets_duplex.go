@@ -768,7 +768,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				var credentialErr error
 				if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 					credentialErr = wsErr
-				} else if streamErr, _, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+				} else if streamErr, _, ok := codexTerminalFailureErrForSourceWithCooling(payload, current.from, e.modelLevelCooling()); ok {
 					credentialErr = streamErr
 				}
 				var status interface{ StatusCode() int }
@@ -826,7 +826,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			if wsErr, ok := parseCodexWebsocketErrorWithCooling(payload, e.modelLevelCooling()); ok {
 				terminalErr = wsErr
 				replayErr = clearCodexReasoningReplayOnWebsocketError(ctx, eventPrepared.replayScope, payload)
-			} else if streamErr, body, ok := codexTerminalFailureErrWithCooling(payload, e.modelLevelCooling()); ok {
+			} else if streamErr, body, ok := codexTerminalFailureErrForSourceWithCooling(payload, eventPrepared.from, e.modelLevelCooling()); ok {
 				terminalErr = streamErr
 				replayErr = clearCodexReasoningReplayOnInvalidSignature(ctx, eventPrepared.replayScope, streamErr.StatusCode(), body)
 			}
@@ -841,6 +841,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				terminalBusinessRejection = errors.As(terminalErr, &status) && status.StatusCode() == http.StatusBadRequest
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", terminalErr)
 				eventReporter.PublishFailure(ctx, terminalErr)
+				if eventPrepared.from == sdktranslator.FormatClaude {
+					if _, incompleteFailure := helps.CodexClaudeIncompleteFailureReason(payload); incompleteFailure {
+						// Duplex consumers own the wire protocol: retain the terminal
+						// event before reporting its failure, including at bootstrap.
+						if send(cliproxyexecutor.StreamChunk{Payload: payload, Incomplete: true}) {
+							send(cliproxyexecutor.StreamChunk{Err: terminalErr})
+						}
+						return
+					}
+				}
 				if firstResponse {
 					send(cliproxyexecutor.StreamChunk{Err: terminalErr})
 					return

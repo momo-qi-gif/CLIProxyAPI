@@ -31,6 +31,8 @@ auths/*
 # Documentation
 docs/*
 !docs/management-api-v8.md
+!docs/clirelay-compatibility.md
+!docs/clirelay-compatibility-verification.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

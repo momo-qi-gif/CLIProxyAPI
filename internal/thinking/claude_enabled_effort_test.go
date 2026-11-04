@@ -22,9 +22,9 @@ func TestApplyThinking_ClaudeEnabledWithOutputConfigEffort(t *testing.T) {
 			wantEffort: "high",
 		},
 		{
-			name:       "legacy budget remains authoritative when both are present",
+			name:       "explicit effort overrides legacy budget when both are present",
 			body:       `{"model":"custom-openai","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":8192},"output_config":{"effort":"high"}}`,
-			wantEffort: "medium",
+			wantEffort: "high",
 		},
 		{
 			name:       "enabled without budget or effort keeps auto default",
