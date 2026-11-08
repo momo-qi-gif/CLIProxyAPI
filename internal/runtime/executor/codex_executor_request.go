@@ -790,6 +790,9 @@ func ensureImageGenerationToolDoc(doc *ojson.Doc, baseModel string, auth *clipro
 	if doc == nil || isCodexResponsesLiteRequestDoc(doc, headers) {
 		return false
 	}
+	if helps.IsToollessAutoClassifierDoc(doc) {
+		return false
+	}
 	if strings.HasSuffix(baseModel, "spark") {
 		return false
 	}
