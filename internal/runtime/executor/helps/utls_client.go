@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	tls "github.com/refraction-networking/utls"
 	internalcache "github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
+	requestlog "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/httptransport"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
@@ -69,12 +71,75 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 	return &utlsRoundTripper{dialer: dialer}
 }
 
+// createConnection retries establishment only. No HTTP request has been sent
+// until this returns successfully; RoundTrip and response reads are never replayed.
 func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr string) (*tls.UConn, error) {
+	conn, _, err := t.createConnectionWithAttempts(ctx, host, addr)
+	return conn, err
+}
+
+func (t *utlsRoundTripper) createConnectionWithAttempts(ctx context.Context, host, addr string) (*tls.UConn, int, error) {
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, attempt + 1, err
+		}
+		conn, err := t.createConnectionOnce(ctx, host, addr, attempt+1)
+		if err == nil || attempt == 1 || !retryableUtlsSetupError(ctx, err) {
+			return conn, attempt + 1, err
+		}
+		stage := "dial"
+		if strings.HasPrefix(err.Error(), "utls: TLS handshake:") {
+			stage = "tls_handshake"
+		}
+		fields := log.Fields{"request_id": requestlog.GetRequestID(ctx), "correlation_id": requestlog.GetRequestID(ctx), "stage": stage, "next_attempt": 2, "http_request_sent": false}
+		log.WithContext(ctx).WithFields(fields).Warn(requestlog.CPAEventMessage("utls_connection_setup_retry", fields))
+		timer := time.NewTimer(150 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, attempt + 1, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func retryableUtlsSetupError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	// Do not classify certificate/protocol errors by text or retry arbitrary errors.
+	for _, transient := range []error{syscall.ECONNRESET, syscall.ECONNREFUSED, syscall.ETIMEDOUT, syscall.EPIPE, io.EOF, io.ErrUnexpectedEOF, io.ErrClosedPipe} {
+		if errors.Is(err, transient) {
+			return true
+		}
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) && networkError.Timeout()
+}
+
+func logUtlsStage(ctx context.Context, attempt int, stage string, started time.Time, err error, conn net.Conn) {
+	result := "ok"
+	if err != nil {
+		result = "error"
+	}
+	fields := log.Fields{"request_id": requestlog.GetRequestID(ctx), "correlation_id": requestlog.GetRequestID(ctx), "attempt": attempt,
+		"stage": stage, "result": result, "duration_ms": float64(time.Since(started).Microseconds()) / 1000}
+	if conn != nil {
+		if _, port, splitError := net.SplitHostPort(conn.LocalAddr().String()); splitError == nil {
+			fields["local_port"] = port
+		}
+	}
+	log.WithContext(ctx).WithFields(fields).Info(requestlog.CPAEventMessage("cpa_connection_stage", fields))
+}
+
+func (t *utlsRoundTripper) createConnectionOnce(ctx context.Context, host, addr string, attempt int) (*tls.UConn, error) {
 	contextDialer, ok := t.dialer.(proxy.ContextDialer)
 	if !ok {
 		return nil, fmt.Errorf("utls: dialer does not support context cancellation")
 	}
+	dialStarted := time.Now()
 	conn, errDial := contextDialer.DialContext(ctx, "tcp", addr)
+	logUtlsStage(ctx, attempt, "dial", dialStarted, errDial, conn)
 	if errDial != nil {
 		return nil, fmt.Errorf("utls: dial upstream: %w", errDial)
 	}
@@ -84,7 +149,10 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 
 	handshakeCtx, cancelHandshake := handshakeContext(ctx)
 	defer cancelHandshake()
-	if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
+	handshakeStarted := time.Now()
+	errHandshake := tlsConn.HandshakeContext(handshakeCtx)
+	logUtlsStage(ctx, attempt, "tls_handshake", handshakeStarted, errHandshake, conn)
+	if errHandshake != nil {
 		errHandshake = classifyHandshakeError(ctx, handshakeCtx, errHandshake)
 		if errors.Is(errHandshake, context.Canceled) || errors.Is(errHandshake, context.DeadlineExceeded) {
 			return nil, fmt.Errorf("utls: TLS handshake: %w", errHandshake)
@@ -106,11 +174,14 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	addr := net.JoinHostPort(hostname, port)
 
-	tlsConn, err := t.createConnection(req.Context(), hostname, addr)
+	tlsConn, attempt, err := t.createConnectionWithAttempts(req.Context(), hostname, addr)
 	if err != nil {
 		return nil, err
 	}
-	return roundTripUtlsConnection(req, tlsConn)
+	started := time.Now()
+	response, err := roundTripUtlsConnection(req, tlsConn)
+	logUtlsStage(req.Context(), attempt, "response_headers", started, err, nil)
+	return response, err
 }
 
 // roundTripUtlsConnection selects the HTTP protocol before sending the request.

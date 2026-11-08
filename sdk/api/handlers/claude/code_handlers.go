@@ -24,6 +24,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	requestlog "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -88,6 +89,8 @@ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
 
 	// Check if the client requested a streaming response.
 	streamResult := ojson.GetBytesNoCopy(rawJSON, "stream")
+	c.Set(requestlog.CPAModelKey, ojson.GetBytesNoCopy(rawJSON, "model").String())
+	c.Set(requestlog.CPAStreamedKey, streamResult.Exists() && streamResult.Type != ojson.False)
 	if !streamResult.Exists() || streamResult.Type == ojson.False {
 		h.handleNonStreamingResponse(c, rawJSON)
 	} else {
@@ -209,7 +212,10 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	}
 
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-	_, _ = c.Writer.Write(resp)
+	_, errWrite := c.Writer.Write(resp)
+	if errWrite == nil && ojson.GetBytesNoCopy(resp, "type").String() == "message" && ojson.GetBytesNoCopy(resp, "stop_reason").String() != "" {
+		c.Set(requestlog.CPAOutcomeKey, "success")
+	}
 	cliCancel()
 }
 
@@ -349,6 +355,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 }
 
 type claudeSSEStreamState struct {
+	firstVisibleTextAt time.Time
 	sawErrorEvent      bool
 	sawMessageStop     bool
 	sawBareMessageJSON bool
@@ -431,11 +438,27 @@ func (s *claudeSSEStreamState) observeLine(line []byte) {
 func (s *claudeSSEStreamState) observeJSONPayload(payload []byte, hasDataPrefix bool) {
 	root := util.ParseGJSONBytesNoCopy(payload)
 	switch root.Get("type").String() {
+	case "content_block_delta":
+		if s.firstVisibleTextAt.IsZero() && root.Get("delta.type").String() == "text_delta" && root.Get("delta.text").String() != "" {
+			s.firstVisibleTextAt = time.Now()
+		}
+	case "content_block_start":
+		if s.firstVisibleTextAt.IsZero() && root.Get("content_block.type").String() == "text" && root.Get("content_block.text").String() != "" {
+			s.firstVisibleTextAt = time.Now()
+		}
 	case "message_stop":
 		s.sawMessageStop = true
 	case "error":
 		s.sawErrorEvent = true
 	case "message":
+		if !hasDataPrefix && s.firstVisibleTextAt.IsZero() {
+			for _, block := range root.Get("content").Array() {
+				if block.Get("type").String() == "text" && block.Get("text").String() != "" {
+					s.firstVisibleTextAt = time.Now()
+					break
+				}
+			}
+		}
 		if !hasDataPrefix && strings.TrimSpace(root.Get("stop_reason").String()) != "" {
 			s.sawMessageStop = true
 			s.sawBareMessageJSON = true
@@ -476,12 +499,52 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 	if state == nil {
 		state = &claudeSSEStreamState{trailingNewlines: 2}
 	}
+	failureLogged := false
+	defer func() {
+		state.FlushPendingLine()
+		outcome := "unknown"
+		switch {
+		case failureLogged || state.sawErrorEvent:
+			outcome = "stream_error"
+		case state.sawMessageStop:
+			outcome = "success"
+		case c.Request != nil && c.Request.Context().Err() != nil:
+			outcome = "cancelled"
+		}
+		c.Set(requestlog.CPAOutcomeKey, outcome)
+		if value, ok := c.Get(requestlog.CPAStartedAtKey); ok {
+			if start, valid := value.(time.Time); valid && !state.firstVisibleTextAt.IsZero() && !state.firstVisibleTextAt.Before(start) {
+				c.Set(requestlog.CPAFirstContentMSKey, state.firstVisibleTextAt.Sub(start).Milliseconds())
+			}
+		}
+	}()
+	logFailure := func(kind string, upstreamStatus int) {
+		if failureLogged {
+			return
+		}
+		failureLogged = true
+		ctx := context.Background()
+		if c.Request != nil {
+			ctx = c.Request.Context()
+		}
+		// Never log the error text: upstream errors may contain payloads or secrets.
+		fields := log.Fields{"request_id": requestlog.GetRequestID(ctx), "correlation_id": requestlog.GetRequestID(ctx),
+			"http_status": c.Writer.Status(), "upstream_status": upstreamStatus,
+			"failure_kind": kind, "stream_completed": false}
+		log.WithContext(ctx).WithFields(fields).Warn(requestlog.CPAEventMessage("claude_stream_failed", fields))
+	}
+	if state.sawErrorEvent {
+		logFailure("upstream_error_event", 0)
+	}
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			if len(chunk) == 0 {
 				return
 			}
 			state.ObserveChunk(chunk)
+			if state.sawErrorEvent {
+				logFailure("upstream_error_event", 0)
+			}
 			_, _ = c.Writer.Write(chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
@@ -489,6 +552,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 			if errMsg == nil {
 				return
 			}
+			logFailure("terminal_error", errMsg.StatusCode)
 			if state.sawErrorEvent {
 				state.ensureSSEEventBoundary(c.Writer)
 				return
@@ -503,6 +567,7 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStreamWithState(c *gin.Context, flus
 			if state.sawMessageStop || state.sawErrorEvent {
 				return nil
 			}
+			logFailure("missing_terminal", http.StatusBadGateway)
 			return &interfaces.ErrorMessage{
 				StatusCode: http.StatusBadGateway,
 				Error:      fmt.Errorf("upstream stream closed before message_stop"),
