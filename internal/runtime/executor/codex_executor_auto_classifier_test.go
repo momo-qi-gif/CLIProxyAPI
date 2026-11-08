@@ -64,35 +64,40 @@ func TestEnsureImageGenerationToolAutoClassifierBoundaries(t *testing.T) {
 		{name: "function call history", wantTools: 1, edits: []edit{{"input.-1", `{"type":"function_call","name":"inspect_file","call_id":"synthetic","arguments":"{}"}`}}},
 		{name: "function result history", wantTools: 1, edits: []edit{{"input.-1", `{"type":"function_call_output","call_id":"synthetic","output":"OK"}`}}},
 	} {
-		t.Run(tt.name, func(t *testing.T) {
-			doc := ojson.NewDocString(autoClassifierCodexFixture)
-			for _, change := range tt.edits {
-				var err error
-				if change.raw == "" {
-					err = doc.Delete(change.path)
-				} else {
-					err = doc.SetRawBytes(change.path, []byte(change.raw))
+		for _, baseModel := range []string{"gpt-6.1-terra", "synthetic-full-responses"} {
+			t.Run(tt.name+"/"+baseModel, func(t *testing.T) {
+				doc := ojson.NewDocString(autoClassifierCodexFixture)
+				if err := doc.SetRawBytes("model", []byte(fmt.Sprintf("%q", baseModel))); err != nil {
+					t.Fatal(err)
 				}
-				if err != nil {
-					t.Fatalf("prepare fixture %s: %v", change.path, err)
+				for _, change := range tt.edits {
+					var err error
+					if change.raw == "" {
+						err = doc.Delete(change.path)
+					} else {
+						err = doc.SetRawBytes(change.path, []byte(change.raw))
+					}
+					if err != nil {
+						t.Fatalf("prepare fixture %s: %v", change.path, err)
+					}
 				}
-			}
-			before := bytes.Clone(doc.Bytes())
-			got := ensureImageGenerationTool(before, "gpt-6.1-terra", nil, nil)
-			if tt.unchanged {
-				if !bytes.Equal(got, before) {
-					t.Fatalf("request must remain unchanged; got tools=%s", ojson.GetBytes(got, "tools").Raw)
+				before := bytes.Clone(doc.Bytes())
+				got := ensureImageGenerationTool(before, baseModel, nil, nil)
+				if tt.unchanged || baseModel == "gpt-6.1-terra" {
+					if !bytes.Equal(got, before) {
+						t.Fatalf("request must remain unchanged; got tools=%s", ojson.GetBytes(got, "tools").Raw)
+					}
+					return
 				}
-				return
-			}
-			tools := ojson.GetBytes(got, "tools").Array()
-			if len(tools) != tt.wantTools || tools[len(tools)-1].Get("type").String() != "image_generation" {
-				t.Fatalf("prior injection policy changed: tools=%s, want %d tools ending in image_generation", ojson.GetBytes(got, "tools").Raw, tt.wantTools)
-			}
-			if gotEffort := ojson.GetBytes(got, "reasoning.effort").String(); gotEffort != "medium" {
-				t.Fatalf("reasoning effort changed: %q", gotEffort)
-			}
-		})
+				tools := ojson.GetBytes(got, "tools").Array()
+				if len(tools) != tt.wantTools || tools[len(tools)-1].Get("type").String() != "image_generation" {
+					t.Fatalf("prior injection policy changed: tools=%s, want %d tools ending in image_generation", ojson.GetBytes(got, "tools").Raw, tt.wantTools)
+				}
+				if gotEffort := ojson.GetBytes(got, "reasoning.effort").String(); gotEffort != "medium" {
+					t.Fatalf("reasoning effort changed: %q", gotEffort)
+				}
+			})
+		}
 	}
 }
 

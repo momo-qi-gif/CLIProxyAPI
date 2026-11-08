@@ -10,6 +10,22 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 )
 
+func TestClaudePolicyRefusalTelemetryNotSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest("POST", "/v1/messages", nil)
+	data := make(chan []byte, 1)
+	data <- []byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"type\":\"refusal\",\"category\":\"cyber\",\"explanation\":\"synthetic policy block\"}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	close(data)
+	errs := make(chan *interfaces.ErrorMessage)
+	close(errs)
+	NewClaudeCodeAPIHandler(&handlers.BaseAPIHandler{}).forwardClaudeStream(c, c.Writer, func(error) {}, data, errs)
+	if outcome := c.GetString("cpa.outcome"); outcome != "stream_error" {
+		t.Fatalf("policy refusal outcome=%q, want stream_error", outcome)
+	}
+}
+
 func TestClaudeBareMessageVisibleTiming(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
